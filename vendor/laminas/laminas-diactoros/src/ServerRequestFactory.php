@@ -9,16 +9,29 @@ use Laminas\Diactoros\ServerRequestFilter\FilterUsingXForwardedHeaders;
 use Psr\Http\Message\ServerRequestFactoryInterface;
 use Psr\Http\Message\ServerRequestInterface;
 
+use function array_change_key_case;
 use function array_key_exists;
+use function explode;
+use function gettype;
+use function implode;
+use function is_array;
+use function is_bool;
 use function is_callable;
+use function is_string;
+use function ltrim;
+use function preg_match;
+use function preg_replace;
+use function sprintf;
+use function strlen;
+use function strpos;
+use function strrpos;
+use function strtolower;
+use function substr;
+
+use const CASE_LOWER;
 
 /**
  * Class for marshaling a request object from the current PHP environment.
- *
- * Logic largely refactored from the Laminas Laminas\Http\PhpEnvironment\Request class.
- *
- * @copyright Copyright (c) 2005-2015 Laminas (https://www.zend.com)
- * @license   https://getlaminas.org/license/new-bsd New BSD License
  */
 class ServerRequestFactory implements ServerRequestFactoryInterface
 {
@@ -39,6 +52,7 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
      * order to marshal the request URI and headers.
      *
      * @see fromServer()
+     *
      * @param array $server $_SERVER superglobal
      * @param array $query $_GET superglobal
      * @param array $body $_POST superglobal
@@ -49,19 +63,18 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
      *     returned by this method. When not present, a default instance of
      *     FilterUsingXForwardedHeaders is created, using the `trustReservedSubnets()`
      *     constructor.
-     * @return ServerRequest
      */
     public static function fromGlobals(
-        array $server = null,
-        array $query = null,
-        array $body = null,
-        array $cookies = null,
-        array $files = null,
+        ?array $server = null,
+        ?array $query = null,
+        ?array $body = null,
+        ?array $cookies = null,
+        ?array $files = null,
         ?FilterServerRequestInterface $requestFilter = null
-    ) : ServerRequest {
+    ): ServerRequest {
         $requestFilter = $requestFilter ?: FilterUsingXForwardedHeaders::trustReservedSubnets();
 
-        $server = normalizeServer(
+        $server  = normalizeServer(
             $server ?: $_SERVER,
             is_callable(self::$apacheRequestHeaders) ? self::$apacheRequestHeaders : null
         );
@@ -75,7 +88,7 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
         return $requestFilter(new ServerRequest(
             $server,
             $files,
-            self::marshalUriFromSapi($server),
+            self::marshalUriFromSapi($server, $headers),
             marshalMethodFromSapi($server),
             'php://input',
             $headers,
@@ -89,7 +102,7 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
     /**
      * {@inheritDoc}
      */
-    public function createServerRequest(string $method, $uri, array $serverParams = []) : ServerRequestInterface
+    public function createServerRequest(string $method, $uri, array $serverParams = []): ServerRequestInterface
     {
         $uploadedFiles = [];
 
@@ -105,14 +118,15 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
     /**
      * Marshal a Uri instance based on the values present in the $_SERVER array and headers.
      *
+     * @param array<string, string|list<string>> $headers
      * @param array $server SAPI parameters
      */
-    private static function marshalUriFromSapi(array $server) : Uri
+    private static function marshalUriFromSapi(array $server, array $headers): Uri
     {
         $uri = new Uri('');
 
         // URI scheme
-        $https  = false;
+        $https = false;
         if (array_key_exists('HTTPS', $server)) {
             $https = self::marshalHttpsValue($server['HTTPS']);
         } elseif (array_key_exists('https', $server)) {
@@ -122,7 +136,7 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
         $uri = $uri->withScheme($https ? 'https' : 'http');
 
         // Set the host
-        [$host, $port] = self::marshalHostAndPort($server);
+        [$host, $port] = self::marshalHostAndPort($server, $headers);
         if (! empty($host)) {
             $uri = $uri->withHost($host);
             if (! empty($port)) {
@@ -157,12 +171,26 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
     /**
      * Marshal the host and port from the PHP environment.
      *
+     * @param array<string, string|list<string>> $headers
      * @return array{string, int|null} Array of two items, host and port,
      *     in that order (can be passed to a list() operation).
      */
-    private static function marshalHostAndPort(array $server) : array
+    private static function marshalHostAndPort(array $server, array $headers): array
     {
         static $defaults = ['', null];
+
+        $host = self::getHeaderFromArray('host', $headers, false);
+        if ($host !== false) {
+            // Ignore obviously malformed host headers:
+            // - Whitespace is invalid within a hostname and break the URI representation within HTTP.
+            //   non-printable characters other than SPACE and TAB are already rejected by HeaderSecurity.
+            // - A comma indicates that multiple host headers have been sent which is not legal
+            //   and might be used in an attack where a load balancer sees a different host header
+            //   than Diactoros.
+            if (! preg_match('/[\\t ,]/', $host)) {
+                return self::marshalHostAndPortFromHeader($host);
+            }
+        }
 
         if (! isset($server['SERVER_NAME'])) {
             return $defaults;
@@ -171,7 +199,8 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
         $host = (string) $server['SERVER_NAME'];
         $port = isset($server['SERVER_PORT']) ? (int) $server['SERVER_PORT'] : null;
 
-        if (! isset($server['SERVER_ADDR'])
+        if (
+            ! isset($server['SERVER_ADDR'])
             || ! preg_match('/^\[[0-9a-fA-F\:]+\]$/', $host)
         ) {
             return [$host, $port];
@@ -186,7 +215,7 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
      * @return array{string, int|null} Array of two items, host and port,
      *     in that order (can be passed to a list() operation).
      */
-    private static function marshalIpv6HostAndPort(array $server, ?int $port) : array
+    private static function marshalIpv6HostAndPort(array $server, ?int $port): array
     {
         $host             = '[' . (string) $server['SERVER_ADDR'] . ']';
         $port             = $port ?: 80;
@@ -214,7 +243,7 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
      * - REQUEST_URI
      * - ORIG_PATH_INFO
      */
-    private static function marshalRequestPath(array $server) : string
+    private static function marshalRequestPath(array $server): string
     {
         // IIS7 with URL Rewrite: make sure we get the unencoded url
         // (double slash problem).
@@ -241,7 +270,7 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
     /**
      * @param mixed $https
      */
-    private static function marshalHttpsValue($https) : bool
+    private static function marshalHttpsValue($https): bool
     {
         if (is_bool($https)) {
             return $https;
@@ -255,5 +284,50 @@ class ServerRequestFactory implements ServerRequestFactoryInterface
         }
 
         return 'on' === strtolower($https);
+    }
+
+    /**
+     * @param string|list<string> $host
+     * @return array Array of two items, host and port, in that order (can be
+     *     passed to a list() operation).
+     */
+    private static function marshalHostAndPortFromHeader($host): array
+    {
+        if (is_array($host)) {
+            $host = implode(', ', $host);
+        }
+
+        $port = null;
+
+        // works for regname, IPv4 & IPv6
+        if (preg_match('|\:(\d+)$|', $host, $matches)) {
+            $host = substr($host, 0, -1 * (strlen($matches[1]) + 1));
+            $port = (int) $matches[1];
+        }
+
+        return [$host, $port];
+    }
+
+    /**
+     * Retrieve a header value from an array of headers using a case-insensitive lookup.
+     *
+     * @template T
+     * @param array<string, string|list<string>> $headers Key/value header pairs
+     * @param T $default Default value to return if header not found
+     * @return string|T
+     */
+    private static function getHeaderFromArray(string $name, array $headers, $default = null)
+    {
+        $header  = strtolower($name);
+        $headers = array_change_key_case($headers, CASE_LOWER);
+        if (! array_key_exists($header, $headers)) {
+            return $default;
+        }
+
+        if (is_string($headers[$header])) {
+            return $headers[$header];
+        }
+
+        return implode(', ', $headers[$header]);
     }
 }
