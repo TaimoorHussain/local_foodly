@@ -21,7 +21,7 @@ class EmployeeLoginController extends Controller
     {
         $custome_recaptcha = new CaptchaBuilder;
         $custome_recaptcha->build();
-        Session::put('six_captcha', $custome_recaptcha->getPhrase());
+        // Session::put('six_captcha', $custome_recaptcha->getPhrase());
         return view('vendor-views.auth.login', compact('custome_recaptcha'));
     }
 
@@ -32,27 +32,27 @@ class EmployeeLoginController extends Controller
             'password' => 'required|min:8'
         ]);
 
-        $recaptcha = Helpers::get_business_settings('recaptcha');
-        if (isset($recaptcha) && $recaptcha['status'] == 1) {
-            $request->validate([
-                'g-recaptcha-response' => [
-                    function ($attribute, $value, $fail) {
-                        $secret_key = Helpers::get_business_settings('recaptcha')['secret_key'];
-                        $response = $value;
-                        $url = 'https://www.google.com/recaptcha/api/siteverify?secret=' . $secret_key . '&response=' . $response;
-                        $response = \file_get_contents($url);
-                        $response = json_decode($response);
-                        if (!$response->success) {
-                            $fail(trans('messages.ReCAPTCHA Failed'));
-                        }
-                    },
-                ],
-            ]);
-        } else if(session('six_captcha') != $request->custome_recaptcha)
-        {
-            Toastr::error(trans('messages.ReCAPTCHA Failed'));
-            return back();
-        }
+        // $recaptcha = Helpers::get_business_settings('recaptcha');
+        // if (isset($recaptcha) && $recaptcha['status'] == 1) {
+        //     $request->validate([
+        //         'g-recaptcha-response' => [
+        //             function ($attribute, $value, $fail) {
+        //                 $secret_key = Helpers::get_business_settings('recaptcha')['secret_key'];
+        //                 $response = $value;
+        //                 $url = 'https://www.google.com/recaptcha/api/siteverify?secret=' . $secret_key . '&response=' . $response;
+        //                 $response = \file_get_contents($url);
+        //                 $response = json_decode($response);
+        //                 if (!$response->success) {
+        //                     $fail(trans('messages.ReCAPTCHA Failed'));
+        //                 }
+        //             },
+        //         ],
+        //     ]);
+        // } else if(session('six_captcha') != $request->custome_recaptcha)
+        // {
+        //     Toastr::error(trans('messages.ReCAPTCHA Failed'));
+        //     return back();
+        // }
 
         $employee = VendorEmployee::where('email', $request->email)->first();
         if($employee)
